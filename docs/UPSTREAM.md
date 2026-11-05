@@ -29,21 +29,32 @@ Every upstream file iNilla changes, and why. Each change is marked `iNilla` in a
 | `Cargo.toml` | `[profile.ios]` (release, no LTO, symbols kept) |
 | `crates/benilla-app/Cargo.toml` | depends on `inilla-core`, `inilla-platform`, `ureq`, `serde_json`; `bevy_egui` no longer optional; `arboard` not on iOS; the Wayland clipboard's `cfg` excludes iOS; `raw-window-handle` and `winit` on iOS |
 | `crates/benilla-app/src/lib.rs` | `mod inilla`, `pub use inilla_boot`, `add_plugins(inilla::InillaPlugin)` |
-| `crates/benilla-app/src/bindings.rs`, `bindings/script_input.rs` | the synthetic seam `synth_hold`/`synth_release`/`synth_fire` and `Held::Synth` |
 | `crates/benilla-app/src/textinput/clipboard.rs` | the iOS pasteboard backend |
-| `crates/benilla-app/src/login/mod.rs` | `Attempt`/`send` `pub(crate)`, `in_flight()` — the launcher submits through the login screen's path |
 | `crates/benilla-app/src/net/io.rs` | the world address passes through `inilla::world_address` (the realm override) |
 | `crates/benilla-app/src/player/camera.rs` | `LookConfig::yaw_rate`/`pitch_rate` `pub(crate)` (controller look in radians) |
 | `crates/benilla-app/src/debug_panel/mod.rs` | the egui lane's demand gate also reads `inilla::EguiWanted` |
-| `crates/benilla-ui/src/script/mod.rs`, `script/plain.rs` | `eval_plain` (wenilla's) — Lua results as plain values for the console and the HUD icons |
-| `third_party/lua-src/lua-5.1.5/loslib.c`, `BENILLA.md` | `os.execute` answers "not supported" on iOS, where `system()` does not exist |
+| `crates/benilla-ui/src/script/mod.rs`, `script/plain.rs` | `eval_plain` (wenilla's) — Lua results as plain values for the console, the HUD icons and the launcher's screen check |
 | `.github/workflows/close-prs.yml` | removed (upstream closes every PR; this repository takes them) |
-| `crates/benilla-dbc/src/localize.rs` (new), `lib.rs` | `localize` / `data_locale`: a non-English client's DBC text moved into the English column every reader names |
-| `crates/benilla-formats/src/chain.rs`, `lib.rs` | `Chain::open` notes the install's language off `ChrRaces.dbc`; `Chain::read` localizes `.dbc` files of a non-English install; `data_locale()` |
-| `crates/benilla-protocol/src/auth.rs` | `set_client_locale`: the logon challenge reports the game data's language instead of a fixed `enUS` |
-| `crates/benilla-ui/src/script/client.rs`, `mod.rs`, `glue_core.rs` | `set_locale`: `GetLocale()` answers the game data's language in game and glue |
 | `crates/benilla-app/src/addon_harness/render_tests.rs`, `use_probe_tests.rs` | the two tests whose fixtures are symlinks are `cfg(unix)`, so the app's tests build on Windows |
-| `crates/benilla-ui/src/script/client.rs`, `script/model.rs`, `strings.rs`, `script/tooltip_item/render.rs` | `SetEuropeanNumbers`, which the German `Localization.lua` calls at `VARIABLES_LOADED`: `strings::decimal` / `fill_with` write the tooltips' reals (speed, DPS, ammo, cast time, cooldown) with a comma |
+
+### Carries retired by the 2026-11-04 sync
+
+Upstream now does these itself, so they were dropped instead of merged:
+
+- **The binding seam** (`bindings.rs` `synth_*`, `Held::Synth`). Upstream moved the latches into
+  `BindingLatches` and runs binding bodies with the call host lent. `inilla::synth::apply` now
+  runs inside the binding pass (`BindingHead` → `BindingTail`) through `HostedVm`, keeps its own
+  latches, and calls `execute_binding` / `CameraZoomIn(amount)` like a key — no upstream change.
+- **The login hook** (`login/mod.rs`). Upstream removed the native login screen. The launcher now
+  runs the stock `DefaultServerLogin(account, password)` in the glue VM once `AccountLogin` is
+  shown (`inilla::session::submit_queued_login`, `inilla_core::lua::quote`).
+- **The vendored C Lua's `os.execute`** (`loslib.c`). Upstream replaced C Lua with `benilla-lua`,
+  which has no `os.execute`.
+- **The game data's language** (`localize.rs`, `chain.rs`, `auth.rs`, `GetLocale`,
+  `SetEuropeanNumbers`). Upstream reads the client locale from `Wow.ini` (`benilla-formats`
+  `wow_ini`), sends it in the logon challenge, answers `GetLocale` with it, localizes DBC text and
+  implements `SetEuropeanNumbers`. Difference: iNilla guessed the language from `ChrRaces.dbc`;
+  upstream needs `Wow.ini` (`[WoW Config]` `Language`/`Country`) and is `enUS` without one.
 
 Upstream has no CI and never builds iOS, so an upstream change can break only the iOS build; the
 `inilla-check` workflow's iOS type-check is what catches it.

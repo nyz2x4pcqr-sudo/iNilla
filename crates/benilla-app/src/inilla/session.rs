@@ -15,11 +15,8 @@ use bevy::prelude::*;
 use inilla_core::profiles::{Account, ServerProfile};
 
 use super::Inilla;
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::cvars::Cvars;
-use crate::glue::dialog::GlueDialog;
-use crate::glue_strings::GlueStrings;
-use crate::login::Attempt;
 
 /// The active profile's override, for the network thread.
 static WORLD_OVERRIDE: RwLock<Option<ServerProfile>> = RwLock::new(None);
@@ -116,25 +113,44 @@ fn apply_active_server(
     queue.applied = Some(fingerprint);
 }
 
-/// Hand a queued login to the login screen's submit path once the screen is up and idle.
+/// Hand a queued login to the stock login screen's own verb once that screen is up: the launcher
+/// runs `DefaultServerLogin(account, password)` in the glue VM with the call host lent, exactly
+/// the call `AccountLogin_Login` makes when the button is pressed, so the glue manager's guards,
+/// its status dialog, every failure text and the realm list behave as for a typed login. The
+/// verb itself refuses while a logon is already running.
 fn submit_queued_login(
     state: Res<State<ClientState>>,
     mut queue: ResMut<LoginQueue>,
-    mut attempt: Attempt,
-    mut dialog: ResMut<GlueDialog>,
-    strings: Option<Res<GlueStrings>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
 ) {
-    if *state.get() != ClientState::Login || attempt.in_flight() {
+    if *state.get() != ClientState::Login || queue.pending.is_none() {
         return;
     }
-    let Some((user, pass)) = queue.pending.take() else {
-        return;
-    };
-    let text = strings
-        .as_deref()
-        .map(|s| s.text("LOGIN_STATE_CONNECTING", "Connecting").to_string())
-        .unwrap_or_else(|| "Connecting".into());
-    dialog.open_status(&text);
-    info!("inilla: logging in as {user}");
-    attempt.send(&user, &pass, true);
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        // The stock login frame is shown once GlueXML has loaded and put the login screen up.
+        let ready = matches!(
+            script
+                .eval_plain("return AccountLogin ~= nil and AccountLogin:IsVisible() == 1")
+                .as_deref(),
+            Ok([benilla_ui::script::plain::PlainValue::Bool(true), ..])
+        );
+        if !ready {
+            return;
+        }
+        let Some((user, pass)) = queue.pending.take() else {
+            return;
+        };
+        info!("inilla: logging in as {user}");
+        let chunk = format!(
+            "DefaultServerLogin({}, {})",
+            inilla_core::lua::quote(&user),
+            inilla_core::lua::quote(&pass)
+        );
+        if let Err(e) = script.run(&chunk) {
+            warn!("inilla: the login call failed: {e}");
+        }
+    });
 }

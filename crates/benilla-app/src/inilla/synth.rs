@@ -1,6 +1,6 @@
 //! **The command seam** — how the touch HUD, the controller and the remote console press game
 //! commands. Commands are addressed **by their `Bindings.xml` name** and go through
-//! [`BindingsState`] and [`UiScript::execute_binding`], so rebinding a key does not change what
+//! [`UiScript::execute_binding`] with the call host lent, so rebinding a key does not change what
 //! a HUD button does.
 
 use std::collections::HashSet;
@@ -11,7 +11,6 @@ use benilla_ui::script::plain::PlainValue;
 use benilla_ui::script::UiScript;
 use inilla_core::pad::PadBinding;
 
-use crate::bindings::BindingsState;
 use crate::ui_script::UiKeyboardCapture;
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
@@ -301,13 +300,19 @@ impl Synth {
     }
 }
 
-/// Apply the frame's synthetic input. Runs in the binding slot: after the key dispatch cleared
-/// this frame's edges and before the player controller reads them (`BindingSet` → `WorldStage::Input`).
+/// Apply the frame's synthetic input. Runs inside the binding pass, between its head and its tail
+/// (`BindingHead` → `BindingTail`), as one more record of the frame: every body runs with the call
+/// host lent, so its `MoveForwardStart`, `Jump`, `CameraZoomIn` apply inside the call exactly as a
+/// key's do, and the player controller reads them this frame (`WorldStage::Input`).
+///
+/// The synthetic latches are iNilla's own ([`Synth::latched`]): a hold runs the command's down
+/// half once and its up half when the owner lets go, like a key's latch; they die with the VM that
+/// made them, as benilla's own latches do (a new VM's table may not have the command).
 pub(crate) fn apply(
-    mut binds: ResMut<BindingsState>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut synth: ResMut<Synth>,
     capture: Res<UiKeyboardCapture>,
-    mut script: Option<NonSendMut<UiScript>>,
+    mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let synth = &mut *synth;
     let pressed = std::mem::take(&mut synth.pressed);
@@ -336,69 +341,75 @@ pub(crate) fn apply(
         synth.taps.clear();
     }
 
-    let run = |script: &mut Option<NonSendMut<UiScript>>, body: &str| {
-        if let Some(s) = script.as_deref() {
-            crate::ui_script::run_or_warn(s, body);
+    hosted_vm.run(|script| {
+        let Some(s) = script else {
+            // No interface: nothing to run a body on, and nothing latched survives it.
+            synth.latched.clear();
+            return;
+        };
+        if same_vm.claim(s) {
+            synth.latched.clear();
         }
-    };
+        let binding = |s: &UiScript, name: &str, down: bool| {
+            if let Err(e) = s.execute_binding(name, down) {
+                warn!(
+                    "inilla: synth {}({name}): {e}",
+                    if down { "press" } else { "release" }
+                );
+            }
+        };
 
-    for b in &pressed {
-        match b {
-            PadBinding::Command(name) => {
-                if is_movement_or_held(name) {
-                    if !capture.typing && !want.contains(name) {
-                        want.insert(name.clone());
-                        synth.taps.push(name.clone());
-                    }
-                } else if let Some(s) = script.as_mut() {
-                    if let Err(e) = s.execute_binding(name, true) {
-                        warn!("inilla: synth press({name}): {e}");
-                    }
-                }
-            }
-            PadBinding::Lua(chunk) => run(&mut script, chunk),
-            // Serviced by `run_vm_ops` at the top of the next frame, through the chat box's
-            // own submit path, so slash commands parse client-side exactly as typed.
-            PadBinding::Chat(line) => synth.chat.push(line.clone()),
-            PadBinding::None | PadBinding::Special(_) => {}
-        }
-    }
-    for b in &released {
-        if let PadBinding::Command(name) = b {
-            if !is_movement_or_held(name) {
-                if let Some(s) = script.as_mut() {
-                    if let Err(e) = s.execute_binding(name, false) {
-                        warn!("inilla: synth release({name}): {e}");
+        for b in &pressed {
+            match b {
+                PadBinding::Command(name) => {
+                    if is_movement_or_held(name) {
+                        if !capture.typing && !want.contains(name) {
+                            want.insert(name.clone());
+                            synth.taps.push(name.clone());
+                        }
+                    } else {
+                        binding(s, name, true);
                     }
                 }
+                PadBinding::Lua(chunk) => crate::ui_script::run_or_warn(s, chunk),
+                // Serviced by `run_vm_ops` at the top of the next frame, through the chat box's
+                // own submit path, so slash commands parse client-side exactly as typed.
+                PadBinding::Chat(line) => synth.chat.push(line.clone()),
+                PadBinding::None | PadBinding::Special(_) => {}
             }
         }
-    }
-    for (name, amount) in fires {
-        match name {
-            "CAMERAZOOMIN" => binds.synth_fire(crate::bindings::Input::CameraZoomIn, amount),
-            "CAMERAZOOMOUT" => binds.synth_fire(crate::bindings::Input::CameraZoomOut, amount),
-            _ => {
-                if let Some(s) = script.as_mut() {
-                    let _ = s.execute_binding(name, true);
+        for b in &released {
+            if let PadBinding::Command(name) = b {
+                if !is_movement_or_held(name) {
+                    binding(s, name, false);
                 }
             }
         }
-    }
+        for (name, amount) in fires {
+            match name {
+                // The zoom's analog amount (a pinch's notch magnitude), through the same verb the
+                // stock CAMERAZOOMIN/OUT bodies call; `1.0` is the reference's key step.
+                "CAMERAZOOMIN" => {
+                    crate::ui_script::run_or_warn(s, &format!("CameraZoomIn({amount})"))
+                }
+                "CAMERAZOOMOUT" => {
+                    crate::ui_script::run_or_warn(s, &format!("CameraZoomOut({amount})"))
+                }
+                _ => binding(s, name, true),
+            }
+        }
 
-    for c in synth.latched.difference(&want) {
-        binds.synth_release(&mut script, c);
-    }
-    for c in &want {
-        binds.synth_hold(&mut script, c);
-    }
-    synth.latched = want;
-
-    // Apply any binding calls made by Lua during execute_binding directly into BindingsState.
-    if let Some(s) = script.as_mut() {
-        let inputs = s.take_binding_input();
-        binds.apply_script_input(inputs);
-    }
+        let gone: Vec<String> = synth.latched.difference(&want).cloned().collect();
+        for c in gone {
+            binding(s, &c, false);
+            synth.latched.remove(&c);
+        }
+        for c in &want {
+            if synth.latched.insert(c.clone()) {
+                binding(s, c, true);
+            }
+        }
+    });
 }
 
 /// The VM-side ops — chat lines and Lua evaluation — before the VM ticks, so a `/cast` typed by
@@ -425,14 +436,18 @@ pub(crate) fn run_vm_ops(script: Option<NonSendMut<UiScript>>, mut synth: ResMut
 }
 
 /// Drop every synthetic latch at the world's edges, so nothing held on the way out is still held
-/// on the way back in.
-pub(crate) fn release_all(
-    mut binds: ResMut<BindingsState>,
-    mut synth: ResMut<Synth>,
-    mut script: Option<NonSendMut<UiScript>>,
-) {
-    binds.synth_release_all(&mut script);
-    synth.latched.clear();
+/// on the way back in: each runs its up half, as a key let go would.
+pub(crate) fn release_all(mut hosted_vm: crate::script_calls::HostedVm, mut synth: ResMut<Synth>) {
+    let latched: Vec<String> = synth.latched.drain().collect();
+    hosted_vm.run(|script| {
+        if let Some(s) = script {
+            for c in &latched {
+                if let Err(e) = s.execute_binding(c, false) {
+                    warn!("inilla: synth release({c}): {e}");
+                }
+            }
+        }
+    });
     synth.taps.clear();
     synth.held.clear();
     synth.pressed.clear();

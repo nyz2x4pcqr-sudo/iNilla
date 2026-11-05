@@ -11,11 +11,13 @@
 //! - [`settings`] — iNilla's own settings (quality preset, UI scale, debug switches).
 //! - [`http`] — the tiny HTTP/1.1 server under the data host and the remote console.
 //! - [`logring`] — the process-wide log ring the console and the log viewer read.
+//! - [`lua`] — Rust values written as Lua source (the launcher's login call).
 
 pub mod addons;
 pub mod data;
 pub mod http;
 pub mod logring;
+pub mod lua;
 pub mod pad;
 pub mod profiles;
 pub mod settings;
