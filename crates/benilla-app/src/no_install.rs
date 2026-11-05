@@ -72,8 +72,10 @@ fn message(looked_in: &[PathBuf]) -> String {
 
 /// Report `err` and end the boot with a failing exit: stderr always, the dialog too unless the run
 /// is `unattended`, so an instrumented run never waits on a click.
-pub(crate) fn fail(err: &NoInstall, unattended: bool) -> AppExit {
+pub(crate) fn fail(err: &NoInstall, #[allow(unused_variables)] unattended: bool) -> AppExit {
     eprintln!("benilla: {}", err.message());
+    // iNilla: no dialog on iOS, where rfd has no backend; the session log keeps stderr.
+    #[cfg(not(target_os = "ios"))]
     if !unattended {
         // Linux shows it through `zenity` and logs nothing when that is missing, which stderr covers.
         rfd::MessageDialog::new()

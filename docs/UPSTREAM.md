@@ -36,6 +36,7 @@ Every upstream file iNilla changes, and why. Each change is marked `iNilla` in a
 | `crates/benilla-ui/src/script/mod.rs`, `script/plain.rs` | `eval_plain` (wenilla's) — Lua results as plain values for the console, the HUD icons and the launcher's screen check |
 | `.github/workflows/close-prs.yml` | removed (upstream closes every PR; this repository takes them) |
 | `crates/benilla-app/src/addon_harness/render_tests.rs`, `use_probe_tests.rs` | the two tests whose fixtures are symlinks are `cfg(unix)`, so the app's tests build on Windows |
+| `crates/benilla-app/Cargo.toml`, `src/no_install.rs` | `rfd` (the desktop "no WoW install" dialog) only off iOS, where it has no backend; on iOS the message goes to stderr and the session log |
 
 ### Carries retired by the 2026-11-04 sync
 
